@@ -31,18 +31,7 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 Install the required packages:
 
 ```bash
-pip install torch
-pip install llama-index-core
-pip install llama-index-readers-docling
-pip install llama-index-node-parser-docling
-pip install llama-index-readers-file
-pip install python-dotenv
-pip install llama-index-llms-ollama
-pip install llama-index-embeddings-huggingface
-pip install llama-index-llms-huggingface-api
-pip install pdfplumber
-pip install numpy
-pip install streamlit
+pip install -r requirements.txt
 ```
 
 ## Setup Requirements
