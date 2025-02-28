@@ -4,7 +4,7 @@ This project implements a document chatbot using Retrieval-Augmented Generation 
 
 ## Project Overview
 
-This application creates an interactive chat interface where users can discuss the contents of their uploaded PDF documents. It uses a RAG architecture to ensure responses are grounded in the document's actual content, making it ideal for document analysis, research, and information extraction.
+This application creates an interactive chat interface where users can discuss the contents of their uploaded PDF documents. It uses a RAG architecture to ensure responses ade grounded in the document's actual content, making it ideal for document analysis, research, and information extraction.
 
 ## Key Features
 
