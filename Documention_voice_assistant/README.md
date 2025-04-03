@@ -57,7 +57,7 @@ A powerful, locally-hosted voice-enabled documentation assistant that allows you
 4. **Download LLM models with Ollama**:
    ```bash
    ollama pull deepseek-r1:7b
-   ollama pull llama3:8b
+   ollama pull llama3.2:3b
    ```
    (Make sure Ollama is running)
 
