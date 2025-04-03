@@ -82,7 +82,7 @@ def sidebar_config():
         st.markdown("---")
         st.markdown("### 🧠 Model Settings")
 
-        llm_models = ["deepseek-r1:7b", "llama3:8b", "mistral:7b"]
+        llm_models = ["deepseek-r1:7b", "llama3.2:3b", "gemma3:12b"]
         st.session_state.llm_model = st.selectbox(
             "Select LLM Model",
             options=llm_models,
