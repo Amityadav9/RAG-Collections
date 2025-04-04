@@ -5,6 +5,9 @@ import tempfile
 import asyncio
 import sys
 import logging
+import torch
+import time
+from threading import Lock
 
 import streamlit as st
 from dotenv import load_dotenv
@@ -24,12 +27,26 @@ from langchain_community.embeddings import HuggingFaceEmbeddings
 # For Text-to-Speech
 from TTS.api import TTS
 
-# Set up logging
-logging.basicConfig(level=logging.INFO)
+# Set up logging - redirect to file instead of console
+logging.basicConfig(
+    filename="app.log",
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
 logger = logging.getLogger(__name__)
 
-# Load environment variables
-load_dotenv()
+# Global lock to prevent concurrent processing
+query_lock = Lock()
+
+# Check for GPU availability
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+if DEVICE == "cuda":
+    logger.info(f"Using GPU: {torch.cuda.get_device_name(0)}")
+    logger.info(
+        f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f}GB"
+    )
+else:
+    logger.info("Using CPU for processing")
 
 
 # Initialize session state variables
@@ -46,6 +63,13 @@ def init_session_state():
         "tts_model": None,
         "voice_speed": 1.0,
         "current_query": "",
+        "processing": False,
+        "progress_status": "",
+        "query_submitted": False,
+        "temp_query_value": "",  # Use this for storing the query value temporarily
+        "should_clear_input": False,  # Flag to indicate input should be cleared
+        "last_response": None,
+        "audio_data": None,  # Store audio data
     }
 
     for key, value in defaults.items():
@@ -111,15 +135,38 @@ def sidebar_config():
                 help="Adjust the speed of the generated speech",
             )
 
+            # Add TTS model selection
+            tts_models = ["tts_models/en/vctk/vits"]
+
+            if "tts_model_name" not in st.session_state:
+                st.session_state.tts_model_name = tts_models[0]
+
+            st.session_state.tts_model_name = st.selectbox(
+                "TTS Model",
+                options=tts_models,
+                index=tts_models.index(st.session_state.tts_model_name)
+                if st.session_state.tts_model_name in tts_models
+                else 0,
+                help="Select the Text-to-Speech model",
+            )
+
+            # GPU usage for TTS
+            if DEVICE == "cuda":
+                if "tts_use_gpu" not in st.session_state:
+                    st.session_state.tts_use_gpu = True
+
+                st.session_state.tts_use_gpu = st.checkbox(
+                    "Use GPU for TTS",
+                    value=st.session_state.tts_use_gpu,
+                    help="Enable GPU acceleration for Text-to-Speech (recommended)",
+                )
+
+        # System initialization button
         if st.button("Initialize System", type="primary"):
             if st.session_state.doc_text:
-                progress_placeholder = st.empty()
-                with progress_placeholder.container():
-                    try:
-                        st.markdown("🔄 Processing documentation...")
-                        process_documentation(progress_placeholder)
-                    except Exception as e:
-                        st.error(f"Error during setup: {str(e)}")
+                st.session_state.processing = True
+                st.session_state.progress_status = "Processing documentation..."
+                st.rerun()
             else:
                 st.error("Please paste or upload documentation text!")
 
@@ -137,9 +184,12 @@ def process_documentation(progress_placeholder):
         chunks = text_splitter.split_text(content)
         progress_placeholder.markdown(f"✅ Split content into {len(chunks)} chunks")
 
-        # Create embeddings
+        # Create embeddings - use GPU if available
         progress_placeholder.markdown("🔄 Creating embeddings...")
-        embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+        model_kwargs = {"device": DEVICE} if DEVICE == "cuda" else {}
+        embeddings = HuggingFaceEmbeddings(
+            model_name="all-MiniLM-L6-v2", model_kwargs=model_kwargs
+        )
 
         # Create FAISS vector store
         vector_store = FAISS.from_texts(chunks, embeddings)
@@ -148,9 +198,26 @@ def process_documentation(progress_placeholder):
         # Initialize TTS if enabled
         if st.session_state.tts_enabled:
             progress_placeholder.markdown("🔄 Initializing TTS model...")
-            tts = TTS(model_name="tts_models/en/vctk/vits", progress_bar=False)
+
+            # Get selected TTS model name
+            model_name = st.session_state.tts_model_name
+
+            # Initialize TTS with GPU if available and enabled
+            use_gpu = DEVICE == "cuda" and st.session_state.tts_use_gpu
+            tts = TTS(model_name=model_name, progress_bar=False, gpu=use_gpu)
             st.session_state.tts_model = tts
-            progress_placeholder.markdown("✅ TTS model initialized!")
+            progress_placeholder.markdown(f"✅ TTS model initialized ({model_name})")
+
+            # Show available speakers for this model
+            if hasattr(tts, "speakers") and tts.speakers:
+                if len(tts.speakers) <= 10:
+                    speaker_list = ", ".join(tts.speakers)
+                else:
+                    speaker_list = (
+                        ", ".join(tts.speakers[:10])
+                        + f" and {len(tts.speakers) - 10} more"
+                    )
+                progress_placeholder.markdown(f"Available speakers: {speaker_list}")
 
         progress_placeholder.markdown("✅ Vector store created successfully!")
         st.session_state.setup_complete = True
@@ -163,8 +230,17 @@ def process_documentation(progress_placeholder):
 
 
 def process_query(query):
+    # Use lock to prevent concurrent processing
+    if not query_lock.acquire(blocking=False):
+        logger.info("Another query is already being processed")
+        return {
+            "status": "error",
+            "error": "Another query is already being processed. Please wait.",
+        }
+
     try:
         if not st.session_state.setup_complete or not st.session_state.vector_store:
+            query_lock.release()
             return {
                 "status": "error",
                 "error": "System not initialized. Please initialize the system first.",
@@ -211,103 +287,75 @@ def process_query(query):
         # Execute the chain
         response = chain.invoke({"context": context, "question": query})
 
-        # Update chat history
+        # Update chat history if this is a new response
         st.session_state.chat_history.append({"user": query, "bot": response})
+        st.session_state.last_response = response
 
         # Generate TTS if enabled
-        audio_path = None
+        audio_data = None
         if st.session_state.tts_enabled and st.session_state.tts_model:
             try:
-                # Generate audio with improved clarity
+                # Generate audio
                 temp_dir = tempfile.gettempdir()
                 audio_path = os.path.join(temp_dir, f"response_{uuid.uuid4()}.wav")
 
-                # Choose a better speaker for clearer voice
                 tts_model = st.session_state.tts_model
 
-                # Find best speaker (p225 and p226 are often clearer female voices)
+                # Find best speaker
                 best_speaker = None
-                for speaker in tts_model.speakers:
-                    if speaker in [
-                        "p225",
-                        "p226",
-                        "p270",
-                        "p271",
-                    ]:  # Prioritize these voices for clarity
+                preferred_speakers = ["p225", "p226", "p270", "p271"]
+
+                for speaker in preferred_speakers:
+                    if speaker in tts_model.speakers:
                         best_speaker = speaker
                         break
 
                 if not best_speaker and tts_model.speakers:
                     best_speaker = tts_model.speakers[0]
 
-                # Break response into smaller chunks for better speech synthesis
-                # This improves clarity by allowing better phrasing
-                sentences = response.replace("\n", " ").split(". ")
-                chunks = []
-                current_chunk = ""
+                # Generate speech with selected speaker
+                logger.info(f"Generating speech with speaker {best_speaker}")
+                tts_model.tts_to_file(
+                    text=response[:1000],  # Limit length to prevent long processing
+                    file_path=audio_path,
+                    speaker=best_speaker,
+                    speed=st.session_state.voice_speed,
+                )
 
-                for sentence in sentences:
-                    if not sentence.strip():
-                        continue
-                    if (
-                        len(current_chunk) + len(sentence) < 200
-                    ):  # Optimal chunk size for TTS
-                        current_chunk += sentence + ". "
-                    else:
-                        chunks.append(current_chunk)
-                        current_chunk = sentence + ". "
+                # Read the audio file
+                with open(audio_path, "rb") as f:
+                    audio_data = f.read()
 
-                if current_chunk:
-                    chunks.append(current_chunk)
-
-                # Process each chunk with TTS
-                temp_audio_files = []
-                for i, chunk in enumerate(chunks):
-                    chunk_path = os.path.join(temp_dir, f"chunk_{i}_{uuid.uuid4()}.wav")
-                    tts_model.tts_to_file(
-                        text=chunk, file_path=chunk_path, speaker=best_speaker
-                    )
-                    temp_audio_files.append(chunk_path)
-
-                # Combine audio files if multiple chunks
-                if len(temp_audio_files) > 1:
-                    import wave
-
-                    data = []
-                    for file in temp_audio_files:
-                        w = wave.open(file, "rb")
-                        data.append([w.getparams(), w.readframes(w.getnframes())])
-                        w.close()
-
-                    output = wave.open(audio_path, "wb")
-                    output.setparams(data[0][0])
-                    for i in range(len(data)):
-                        output.writeframes(data[i][1])
-                    output.close()
-
-                    # Clean up temp files
-                    for file in temp_audio_files:
-                        try:
-                            os.remove(file)
-                        except:
-                            pass
-                else:
-                    # Just use the single file
-                    audio_path = temp_audio_files[0]
+                # Store audio data in session state
+                st.session_state.audio_data = audio_data
+                logger.info(f"Audio generated successfully: {len(audio_data)} bytes")
 
             except Exception as e:
                 logger.error(f"Error generating TTS: {str(e)}")
                 st.warning(f"Could not generate audio: {str(e)}")
 
+        # Set flag to clear input on next render
+        st.session_state.should_clear_input = True
+
         return {
             "status": "success",
             "text_response": response,
-            "audio_path": audio_path,
+            "audio_data": audio_data,
         }
 
     except Exception as e:
         logger.error(f"Error processing query: {str(e)}")
         return {"status": "error", "error": str(e), "query": query}
+    finally:
+        # Always release the lock
+        query_lock.release()
+
+
+def handle_query_input():
+    # Save the current query to process
+    if st.session_state.query_input:
+        st.session_state.temp_query_value = st.session_state.query_input
+        st.session_state.query_submitted = True
 
 
 def run_streamlit():
@@ -316,19 +364,32 @@ def run_streamlit():
     )
 
     init_session_state()
+
+    # Handle initialization processing
+    if st.session_state.processing:
+        progress_placeholder = st.empty()
+        with progress_placeholder.container():
+            try:
+                st.markdown(f"🔄 {st.session_state.progress_status}")
+                process_documentation(progress_placeholder)
+                st.session_state.processing = False
+            except Exception as e:
+                st.error(f"Error during setup: {str(e)}")
+                st.session_state.processing = False
+
     sidebar_config()
 
-    st.title("🎙️ Documentation Assistant")
+    st.title("🎙️ Documentation Voice Assistant")
+
+    # Show GPU status if available
+    if DEVICE == "cuda":
+        st.sidebar.success(f"🚀 GPU Enabled: {torch.cuda.get_device_name(0)}")
+
     st.markdown("""
     Get answers to your documentation questions! Simply:
-    1. Paste your documentation text in the sidebar
+    1. Paste your documentation text in the sidebar or upload a file
     2. Initialize the system to process the content
     3. Ask your questions in the chat interface below
-    
-    This system uses:
-    - Ollama for LLM inference
-    - FAISS for vector search
-    - TTS for voice synthesis (if enabled)
     """)
 
     # Create a container for the chat interface
@@ -341,45 +402,85 @@ def run_streamlit():
     with chat_container:
         if st.session_state.chat_history:
             for i, chat in enumerate(st.session_state.chat_history):
-                st_message(chat["user"], is_user=True, key=f"user_{i}")
-                st_message(chat["bot"], is_user=False, key=f"bot_{i}")
+                st_message(
+                    chat["user"], is_user=True, key=f"user_{i}_{hash(chat['user'])}"
+                )
+                st_message(
+                    chat["bot"], is_user=False, key=f"bot_{i}_{hash(chat['bot'])}"
+                )
+
+                # Display audio for the latest message
+                if (
+                    i == len(st.session_state.chat_history) - 1
+                    and st.session_state.audio_data
+                ):
+                    st.audio(st.session_state.audio_data, format="audio/wav")
+                    # Include download button
+                    st.download_button(
+                        label="Download Audio Response",
+                        data=st.session_state.audio_data,
+                        file_name=f"response_{i}.wav",
+                        mime="audio/wav",
+                    )
 
     # Input field for the user query
     with input_container:
+        # Handle clearing input if needed
+        initial_value = (
+            ""
+            if st.session_state.should_clear_input
+            else st.session_state.get("query_input", "")
+        )
+        if st.session_state.should_clear_input:
+            st.session_state.should_clear_input = False  # Reset flag
+
         query = st.text_input(
             "What would you like to know about the documentation?",
-            placeholder="e.g., How do I authenticate API requests?",
-            disabled=not st.session_state.setup_complete,
+            value=initial_value,
             key="query_input",
+            placeholder="e.g., How do I authenticate API requests?",
+            disabled=not st.session_state.setup_complete
+            or st.session_state.query_submitted,
+            on_change=handle_query_input,
         )
 
-        # Add a submit button next to the text input
+        # Add a submit button
         col1, col2 = st.columns([5, 1])
-        with col1:
+        with col2:
             submit_button = st.button(
-                "Ask", disabled=not st.session_state.setup_complete
+                "Ask",
+                disabled=not st.session_state.setup_complete
+                or not query
+                or st.session_state.query_submitted,
             )
 
-        if (submit_button or query) and st.session_state.setup_complete and query:
-            # Store the current query
-            current_query = query
+        # Process query when the button is clicked or input is submitted
+        if (
+            submit_button or st.session_state.query_submitted
+        ) and st.session_state.setup_complete:
+            # If query was just submitted through the on_change callback
+            if st.session_state.query_submitted and st.session_state.temp_query_value:
+                query_to_process = st.session_state.temp_query_value
 
-            # Process the query
-            result = process_query(current_query)
+                # Show a spinner during processing
+                with st.spinner("Processing your query..."):
+                    # Process the query
+                    result = process_query(query_to_process)
 
-            if result["status"] == "success":
-                # Display audio if available
-                if result.get("audio_path") and os.path.exists(result["audio_path"]):
-                    st.audio(result["audio_path"], format="audio/wav")
+                    if result["status"] == "success":
+                        # Reset submission flags
+                        st.session_state.query_submitted = False
+                        st.session_state.temp_query_value = ""
 
-                # Store query in session state to preserve it across reruns
-                if "last_query" not in st.session_state:
-                    st.session_state.last_query = current_query
-
-                # Force a rerun to update the UI with the new chat messages
-                st.rerun()
-            else:
-                st.error(f"Error: {result.get('error', 'Unknown error occurred')}")
+                        # Rerun to update UI without modifying the input directly
+                        time.sleep(0.5)  # Small delay to ensure UI update
+                        st.rerun()
+                    else:
+                        st.error(
+                            f"Error: {result.get('error', 'Unknown error occurred')}"
+                        )
+                        st.session_state.query_submitted = False
+                        st.session_state.temp_query_value = ""
 
     if not st.session_state.setup_complete:
         st.info(
