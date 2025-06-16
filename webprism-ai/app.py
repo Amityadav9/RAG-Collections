@@ -229,7 +229,7 @@ Achten Sie besonders auf:
                     # Use Ollama for summarization
                     ollama_chat = ChatOllama(
                         model="gemma3:27b",
-                        base_url="http://192.168.178.136:11434",
+                        base_url="http://local_host",
                         temperature=0.3,
                     )
 
@@ -304,7 +304,7 @@ Achten Sie besonders auf:
                             # Create embeddings using Ollama's snowflake-arctic-embed model
                             embeddings = OllamaEmbeddings(
                                 model="snowflake-arctic-embed",
-                                base_url="http://192.168.178.136:11434",
+                                base_url="http://local_host",
                             )
                             st.info("Using Ollama snowflake-arctic-embed model")
 
@@ -359,7 +359,7 @@ Achten Sie auf:
                 # Initialize Ollama LLM with German-focused parameters
                 llm = ChatOllama(
                     model="magistral:latest",
-                    base_url="http://192.168.178.136:11434",
+                    base_url="http://local_host",
                     temperature=0.3,
                 )
 
