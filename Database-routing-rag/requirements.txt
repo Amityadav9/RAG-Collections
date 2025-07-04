@@ -1,0 +1,12 @@
+langchain-community 
+ollama 
+agno
+langchain
+langgraph
+langchain-core
+qdrant-client
+streamlit
+pypdf
+sentence-transformers
+langchain-ollama    
+duckduckgo-search               
