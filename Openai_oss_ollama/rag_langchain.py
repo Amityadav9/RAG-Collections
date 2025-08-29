@@ -70,7 +70,7 @@ def initialize_chatbot(vector_db):
     memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
     retriever = vector_db.as_retriever()
 
-    # Initialize Ollama LLM with your OpenAI OSS model
+    # Initialize Ollama LLM with the OpenAI OSS model
     llm = Ollama(
         model=MODEL_NAME,
         base_url=OLLAMA_HOST,
@@ -138,7 +138,7 @@ def demo():
         qa_chain = gr.State()
         gr.Markdown("### 🌟 **RAG Chatbot with OpenAI OSS (gpt-oss:20b)** 🌟")
         gr.Markdown(f"""
-        #### Upload your documents and ask questions using OpenAI's first open-source model in ~5 years!
+        #### Upload the documents and ask questions using OpenAI's first open-source model in ~5 years!
         
         **🔗 Ollama Host**: {OLLAMA_HOST}  
         **🤖 Model**: {MODEL_NAME}  
