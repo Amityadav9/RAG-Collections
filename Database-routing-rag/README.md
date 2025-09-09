@@ -1,6 +1,6 @@
 # 📠 Local RAG Agent with Database Routing
 
-A powerful Retrieval-Augmented Generation (RAG) system that intelligently routes queries to specialized databases and provides comprehensive answers using local AI models.
+A powerful Retrieval-Augmented Generation (RAG) system that intelligently routes queries to specialized databases and provides comprehensive answers using local AI models
 
 ## 🌟 Features
 
